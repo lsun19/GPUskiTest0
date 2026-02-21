@@ -1,0 +1,25 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "GPUSKI",
+	"Description": "GPU-driven Instanced Skeletal Mesh Rendering",
+	"Category": "Rendering",
+	"CreatedBy": "",
+	"DocsURL": "",
+	"EngineVersion": "5.5.0",
+	"CanContainContent": false,
+	"Installed": true,
+	"Modules": [
+		{
+			"Name": "GPUSKI",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit",
+			"PlatformAllowList": [
+				"Win64",
+				"Linux",
+				"Mac"
+			]
+		}
+	]
+}
