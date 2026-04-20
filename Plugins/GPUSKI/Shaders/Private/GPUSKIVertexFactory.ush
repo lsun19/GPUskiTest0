@@ -268,24 +268,43 @@ FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput In
 	Intermediates.PrevLocalToWorld = GetInstanceData(Intermediates).PrevLocalToWorld;
 	Intermediates.UnpackedPosition = Input.Position.xyz;
 
-	// Load animation frame indices from per-instance custom data
+	// Load animation data from per-instance custom data (slots 0-3)
+	// CD[0] = CurFrame (uint), CD[1] = PrevFrame (uint), CD[2] = FromFrame (uint), CD[3] = BlendAlpha (float)
 #if ENABLE_PER_INSTANCE_CUSTOM_DATA
-	uint2 FrameIndices;
+	uint  CurFrame, PrevFrame, FromFrame;
+	float BlendAlpha;
 	const bool bUsePrimitiveData = Intermediates.SceneData.InstanceData.CustomDataOffset == INVALID_INSTANCE_PAYLOAD_OFFSET;
 	if (bUsePrimitiveData)
 	{
 		uint4 CDParams = asuint(Intermediates.SceneData.Primitive.CustomPrimitiveData[0]);
-		FrameIndices = CDParams.xy;
+		CurFrame   = CDParams.x;
+		PrevFrame  = CDParams.y;
+		FromFrame  = CDParams.z;
+		BlendAlpha = asfloat(CDParams.w);
 	}
 	else
 	{
 		check(Intermediates.SceneData.InstanceData.CustomDataCount != 0);
-		FrameIndices = asuint(LoadInstancePayloadDataElement(Intermediates.SceneData.InstanceData.CustomDataOffset).xy);
+		float4 CDData = LoadInstancePayloadDataElement(Intermediates.SceneData.InstanceData.CustomDataOffset);
+		CurFrame   = asuint(CDData.x);
+		PrevFrame  = asuint(CDData.y);
+		FromFrame  = asuint(CDData.z);
+		BlendAlpha = CDData.w;
 	}
 #endif
 
-	Intermediates.BlendMatrix = CalcBoneMatrix(Input, FrameIndices.x);
-	Intermediates.PreviousBlendMatrix = CalcBoneMatrix(Input, FrameIndices.y);
+	// Build current-frame blend matrix, lerping from transition source if active
+	float3x4 CurBlendMatrix = CalcBoneMatrix(Input, CurFrame);
+	if (BlendAlpha < 1.0)
+	{
+		float3x4 FromBlendMatrix = CalcBoneMatrix(Input, FromFrame);
+		Intermediates.BlendMatrix = lerp(FromBlendMatrix, CurBlendMatrix, BlendAlpha);
+	}
+	else
+	{
+		Intermediates.BlendMatrix = CurBlendMatrix;
+	}
+	Intermediates.PreviousBlendMatrix = CalcBoneMatrix(Input, PrevFrame);
 
 #if MANUAL_VERTEX_FETCH
 	Intermediates.LocalTangentX = GPUSKIVertexFetch.VF_PackedTangentsBuffer[Input.VertexId * 2 + 0].xyz;

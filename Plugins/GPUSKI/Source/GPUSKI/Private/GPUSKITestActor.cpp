@@ -8,10 +8,12 @@
 #include "Animation/AnimSequenceBase.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
+#include "TimerManager.h"
 
 AGPUSKITestActor::AGPUSKITestActor()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = false; // enabled only in pool mode
 
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 }
@@ -26,6 +28,26 @@ void AGPUSKITestActor::BeginPlay()
 	{
 		SpawnCPUInstances();
 	}
+
+	const bool bPoolMode = bEnableTransition && AnimationPool.Num() >= 2;
+
+	// A/B shared mode — all instances switch together on a single timer
+	if (bEnableTransition && !bPoolMode && AnimationB && GPUHandles.Num() > 0)
+	{
+		bTransitionOnB = false;
+		GetWorldTimerManager().SetTimer(
+			TransitionTimerHandle,
+			this, &AGPUSKITestActor::OnTransitionTimer,
+			TransitionInterval,
+			/*bLoop=*/true
+		);
+	}
+
+	// Pool mode — each instance transitions independently via Tick
+	if (bPoolMode && GPUHandles.Num() > 0)
+	{
+		SetActorTickEnabled(true);
+	}
 }
 
 void AGPUSKITestActor::EndPlay(EEndPlayReason::Type EndPlayReason)
@@ -37,12 +59,32 @@ void AGPUSKITestActor::EndPlay(EEndPlayReason::Type EndPlayReason)
 #if WITH_EDITOR
 void AGPUSKITestActor::RespawnInstances()
 {
+	GetWorldTimerManager().ClearTimer(TransitionTimerHandle);
+
 	DestroyAllInstances();
 	SpawnGPUInstances();
 
 	if (bSpawnCPUComparison)
 	{
 		SpawnCPUInstances();
+	}
+
+	const bool bPoolMode = bEnableTransition && AnimationPool.Num() >= 2;
+
+	if (bEnableTransition && !bPoolMode && AnimationB && GPUHandles.Num() > 0)
+	{
+		bTransitionOnB = false;
+		GetWorldTimerManager().SetTimer(
+			TransitionTimerHandle,
+			this, &AGPUSKITestActor::OnTransitionTimer,
+			TransitionInterval,
+			/*bLoop=*/true
+		);
+	}
+
+	if (bPoolMode && GPUHandles.Num() > 0)
+	{
+		SetActorTickEnabled(true);
 	}
 }
 #endif
@@ -52,7 +94,9 @@ void AGPUSKITestActor::RespawnInstances()
 //----------------------------------------------------------------------
 void AGPUSKITestActor::SpawnGPUInstances()
 {
-	if (!AnimCollection || !Mesh || !Animation)
+	const bool bPoolMode = bEnableTransition && AnimationPool.Num() >= 2;
+
+	if (!AnimCollection || !Mesh || (!Animation && !bPoolMode))
 	{
 		UE_LOG(LogGPUSKI, Warning, TEXT("GPUSKITestActor: AnimCollection, Mesh, and Animation must all be set!"));
 		return;
@@ -66,9 +110,14 @@ void AGPUSKITestActor::SpawnGPUInstances()
 	}
 
 	const FVector Origin = GetActorLocation();
-	const float AnimLength = Animation->GetPlayLength();
+	const float Now = GetWorld()->GetTimeSeconds();
 
 	GPUHandles.Reserve(Rows * Columns);
+	if (bPoolMode)
+	{
+		InstanceCurrentAnimIndices.Reserve(Rows * Columns);
+		InstanceNextTransitionTimes.Reserve(Rows * Columns);
+	}
 
 	for (int32 Row = 0; Row < Rows; Row++)
 	{
@@ -80,13 +129,30 @@ void AGPUSKITestActor::SpawnGPUInstances()
 			Transform.SetLocation(Location);
 
 			FGPUSKIInstanceHandle Handle = Subsystem->CreateInstance(Transform, AnimCollection, Mesh);
+			if (!Handle.IsValid())
+				continue;
 
-			if (Handle.IsValid())
+			if (bPoolMode)
 			{
-				float StartAt = bRandomizeStartTime ? FMath::FRandRange(0.0f, AnimLength) : 0.0f;
-				Subsystem->PlayAnimation(Handle, Animation, 1.0f, true, StartAt);
-				GPUHandles.Add(Handle);
+				// Each instance starts on a randomly chosen animation from the pool
+				const int32 StartIdx = FMath::RandRange(0, AnimationPool.Num() - 1);
+				UAnimSequenceBase* StartAnim = AnimationPool[StartIdx].Get();
+				if (StartAnim)
+				{
+					float StartAt = bRandomizeStartTime ? FMath::FRandRange(0.0f, StartAnim->GetPlayLength()) : 0.0f;
+					Subsystem->PlayAnimation(Handle, StartAnim, 1.0f, true, StartAt);
+				}
+				InstanceCurrentAnimIndices.Add(StartIdx);
+				// Stagger first transitions so they don't all fire at once
+				InstanceNextTransitionTimes.Add(Now + FMath::FRandRange(TransitionIntervalMin, TransitionIntervalMax));
 			}
+			else
+			{
+				float StartAt = bRandomizeStartTime ? FMath::FRandRange(0.0f, Animation->GetPlayLength()) : 0.0f;
+				Subsystem->PlayAnimation(Handle, Animation, 1.0f, true, StartAt);
+			}
+
+			GPUHandles.Add(Handle);
 		}
 	}
 
@@ -159,10 +225,72 @@ void AGPUSKITestActor::SpawnCPUInstances()
 }
 
 //----------------------------------------------------------------------
+// Transition Timer
+//----------------------------------------------------------------------
+void AGPUSKITestActor::OnTransitionTimer()
+{
+	UGPUSKISubsystem* Subsystem = GetWorld()->GetSubsystem<UGPUSKISubsystem>();
+	if (!Subsystem)
+		return;
+
+	// Alternate between Animation and AnimationB
+	bTransitionOnB = !bTransitionOnB;
+	UAnimSequenceBase* NextAnim = bTransitionOnB ? AnimationB.Get() : Animation.Get();
+	if (!NextAnim)
+		return;
+
+	for (FGPUSKIInstanceHandle& Handle : GPUHandles)
+	{
+		Subsystem->PlayAnimation(Handle, NextAnim, 1.0f, true, 0.0f, TransitionBlendTime);
+	}
+}
+
+//----------------------------------------------------------------------
+// Pool mode: per-instance independent transitions
+//----------------------------------------------------------------------
+void AGPUSKITestActor::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	UGPUSKISubsystem* Subsystem = GetWorld()->GetSubsystem<UGPUSKISubsystem>();
+	if (!Subsystem)
+		return;
+
+	const float Now = GetWorld()->GetTimeSeconds();
+
+	for (int32 i = 0; i < GPUHandles.Num(); i++)
+	{
+		if (Now < InstanceNextTransitionTimes[i])
+			continue;
+
+		// Pick a different animation from the pool than the one currently playing
+		int32 NextIdx = InstanceCurrentAnimIndices[i];
+		do { NextIdx = FMath::RandRange(0, AnimationPool.Num() - 1); }
+		while (NextIdx == InstanceCurrentAnimIndices[i] && AnimationPool.Num() > 1);
+
+		UAnimSequenceBase* NextAnim = AnimationPool[NextIdx].Get();
+		if (NextAnim)
+		{
+			Subsystem->PlayAnimation(GPUHandles[i], NextAnim, 1.0f, true, 0.0f, TransitionBlendTime);
+			InstanceCurrentAnimIndices[i] = NextIdx;
+		}
+
+		InstanceNextTransitionTimes[i] = Now + FMath::FRandRange(TransitionIntervalMin, TransitionIntervalMax);
+	}
+}
+
+//----------------------------------------------------------------------
 // Cleanup
 //----------------------------------------------------------------------
 void AGPUSKITestActor::DestroyAllInstances()
 {
+	GetWorldTimerManager().ClearTimer(TransitionTimerHandle);
+	bTransitionOnB = false;
+
+	SetActorTickEnabled(false);
+	InstanceNextTransitionTimes.Empty();
+	InstanceCurrentAnimIndices.Empty();
+
 	// Destroy GPU instances
 	UGPUSKISubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UGPUSKISubsystem>() : nullptr;
 	if (Subsystem)

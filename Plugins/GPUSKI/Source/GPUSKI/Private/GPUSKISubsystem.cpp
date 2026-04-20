@@ -72,7 +72,7 @@ bool UGPUSKISubsystem::IsHandleValid(const FGPUSKIInstanceHandle& Handle) const
 //----------------------------------------------------------------------
 // Animation
 //----------------------------------------------------------------------
-void UGPUSKISubsystem::PlayAnimation(const FGPUSKIInstanceHandle& Handle, UAnimSequenceBase* Animation, float PlayRate, bool bLoop, float StartAt)
+void UGPUSKISubsystem::PlayAnimation(const FGPUSKIInstanceHandle& Handle, UAnimSequenceBase* Animation, float PlayRate, bool bLoop, float StartAt, float BlendInTime)
 {
 	AGPUSKIWorld* World = GetOrCreateWorld();
 	if (!World)
@@ -83,6 +83,7 @@ void UGPUSKISubsystem::PlayAnimation(const FGPUSKIInstanceHandle& Handle, UAnimS
 	Params.PlayScale = PlayRate;
 	Params.bLoop = bLoop;
 	Params.StartAt = StartAt;
+	Params.BlendInTime = BlendInTime;
 
 	World->PlayAnimation(Handle, Params);
 }

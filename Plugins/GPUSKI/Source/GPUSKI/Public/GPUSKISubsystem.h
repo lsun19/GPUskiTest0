@@ -41,9 +41,9 @@ public:
 	// Animation
 	//----------------------------------------------------------------------
 
-	// Play an animation on an instance
+	// Play an animation on an instance. BlendInTime > 0 smoothly transitions from the current animation.
 	UFUNCTION(BlueprintCallable, Category = "GPUSKI")
-	void PlayAnimation(const FGPUSKIInstanceHandle& Handle, UAnimSequenceBase* Animation, float PlayRate = 1.0f, bool bLoop = true, float StartAt = 0.0f);
+	void PlayAnimation(const FGPUSKIInstanceHandle& Handle, UAnimSequenceBase* Animation, float PlayRate = 1.0f, bool bLoop = true, float StartAt = 0.0f, float BlendInTime = 0.0f);
 
 	//----------------------------------------------------------------------
 	// Transform

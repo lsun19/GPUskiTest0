@@ -494,11 +494,17 @@ void UGPUSKIClusterComponent::BuildDynamicData(FGPUSKICompDynData& OutData) cons
 		PrevInsT.SetLocation(PrevInsT.GetLocation() - OutData.PrevCenter);
 		OutData.PrevTransforms[i] = FRenderTransform(FMatrix44f(PrevInsT.ToMatrixWithScale()));
 
-		// Pack animation frame indices as uint->float reinterpret into custom data slots 0 and 1
+		// Pack animation data into custom data slots 0-3 (all system-reserved)
 		float* CD = &OutData.CustomData[i * NumCDF];
-		uint32 CurFrame = (uint32)SKWorld->SOA.CurAnimFrames[InstIdx];
-		uint32 PreFrame = (uint32)SKWorld->SOA.PreAnimFrames[InstIdx];
-		FMemory::Memcpy(&CD[0], &CurFrame, sizeof(uint32));
-		FMemory::Memcpy(&CD[1], &PreFrame, sizeof(uint32));
+		const FGPUSKIInstancesSOA::FAnimData& AnimData = SKWorld->SOA.AnimDatas[InstIdx];
+
+		uint32 CurFrame  = (uint32)SKWorld->SOA.CurAnimFrames[InstIdx];
+		uint32 PreFrame  = (uint32)SKWorld->SOA.PreAnimFrames[InstIdx];
+		uint32 FromFrame = (uint32)AnimData.FromAnimFrame;
+
+		FMemory::Memcpy(&CD[0], &CurFrame,  sizeof(uint32)); // slot 0: current frame
+		FMemory::Memcpy(&CD[1], &PreFrame,  sizeof(uint32)); // slot 1: previous frame (motion vectors)
+		FMemory::Memcpy(&CD[2], &FromFrame, sizeof(uint32)); // slot 2: transition source frame
+		CD[3] = AnimData.BlendAlpha;                         // slot 3: blend alpha (0=from, 1=current)
 	}
 }

@@ -201,6 +201,21 @@ void AGPUSKIWorld::PlayAnimation(const FGPUSKIInstanceHandle& Handle, const FGPU
 	}
 
 	FGPUSKIInstancesSOA::FAnimData& AnimData = SOA.AnimDatas[Index];
+
+	// Start a blend transition if requested and a sequence is already playing
+	if (Params.BlendInTime > 0.0f && AnimData.IsSequenceValid())
+	{
+		AnimData.FromAnimFrame = SOA.CurAnimFrames[Index];
+		AnimData.BlendAlpha = 0.0f;
+		AnimData.BlendDuration = Params.BlendInTime;
+	}
+	else
+	{
+		AnimData.FromAnimFrame = 0;
+		AnimData.BlendAlpha = 1.0f;
+		AnimData.BlendDuration = 0.0f;
+	}
+
 	AnimData.AnimationCurrentSequence = (uint16)SeqIdx;
 	AnimData.AnimationTime = Params.StartAt;
 	AnimData.AnimationPlayRate = Params.PlayScale;
@@ -224,7 +239,23 @@ void AGPUSKIWorld::SetInstanceTransform(const FGPUSKIInstanceHandle& Handle, con
 	if (!IsHandleValid(Handle))
 		return;
 
-	SOA.Transforms[Handle.InstanceIndex] = Transform;
+	const int32 Index = Handle.InstanceIndex;
+	const FIntVector OldCell = WorldPosToCell(SOA.Transforms[Index].GetLocation());
+	SOA.Transforms[Index] = Transform;
+	const FIntVector NewCell = WorldPosToCell(Transform.GetLocation());
+
+	if (OldCell != NewCell)
+	{
+		// Instance crossed a cell boundary — move it to the correct cluster
+		const FGPUSKIInstancesSOA::FClusterData CD = SOA.ClusterData[Index]; // copy before RemoveFromCluster clears it
+		if (CD.DescIdx != -1)
+		{
+			const FGPUSKIInstanceRenderDesc BaseDesc =
+				static_cast<const FGPUSKIInstanceRenderDesc&>(RenderDescs.Get(FSetElementId::FromInteger(CD.DescIdx)));
+			RemoveFromCluster(Index);
+			AssignToCluster(Index, BaseDesc);
+		}
+	}
 }
 
 FTransform AGPUSKIWorld::GetInstanceTransform(const FGPUSKIInstanceHandle& Handle) const
@@ -284,6 +315,14 @@ void AGPUSKIWorld::TickAnimations(float DeltaSeconds)
 
 				// Compute frame index
 				SOA.CurAnimFrames[InstIdx] = SeqDef.CalcFrameIndex(AnimData.AnimationTime);
+
+				// Advance blend transition
+				if (AnimData.BlendDuration > 0.0f && AnimData.BlendAlpha < 1.0f)
+				{
+					AnimData.BlendAlpha = FMath::Min(1.0f, AnimData.BlendAlpha + DeltaSeconds / AnimData.BlendDuration);
+					if (AnimData.BlendAlpha >= 1.0f)
+						AnimData.BlendDuration = 0.0f; // Transition complete
+				}
 			}
 		}
 	}
@@ -297,28 +336,39 @@ void AGPUSKIWorld::AssignToCluster(int32 InstanceIndex, const FGPUSKIInstanceRen
 	// Find or create the render descriptor
 	FGPUSKIInstanceRenderDescFinal FindKey(RenderDesc);
 	FSetElementId DescId = RenderDescs.FindId(FindKey);
-
 	if (!DescId.IsValidId())
-	{
 		DescId = RenderDescs.Add(FindKey);
-	}
 
 	FGPUSKIInstanceRenderDescFinal& Desc = RenderDescs.Get(DescId);
 
-	// For MVP: use a single cluster per descriptor
-	if (Desc.Clusters.Num() == 0)
+	// Determine which spatial cell this instance belongs to
+	const FIntVector CellKey = WorldPosToCell(SOA.Transforms[InstanceIndex].GetLocation());
+
+	int32 ClusterIdx;
+	if (int32* ExistingIdx = Desc.CellToClusterIndex.Find(CellKey))
 	{
+		ClusterIdx = *ExistingIdx;
+		// Re-create component if the cluster was previously emptied
+		FGPUSKICluster& Cluster = Desc.Clusters[ClusterIdx];
+		if (!Cluster.Component)
+			Cluster.Component = CreateClusterComponent(Desc, ClusterIdx);
+	}
+	else
+	{
+		// First instance in this cell — create a new cluster
+		ClusterIdx = Desc.Clusters.Num();
 		FGPUSKICluster& NewCluster = Desc.Clusters.AddDefaulted_GetRef();
-		NewCluster.Component = CreateClusterComponent(Desc, 0);
+		NewCluster.Component = CreateClusterComponent(Desc, ClusterIdx);
+		Desc.CellToClusterIndex.Add(CellKey, ClusterIdx);
 	}
 
-	FGPUSKICluster& Cluster = Desc.Clusters[0];
-	int32 RenderIdx = Cluster.Instances.Add(InstanceIndex);
+	FGPUSKICluster& Cluster = Desc.Clusters[ClusterIdx];
+	const int32 RenderIdx = Cluster.Instances.Add(InstanceIndex);
 	Cluster.bAnyAddRemove = true;
 
 	FGPUSKIInstancesSOA::FClusterData& CD = SOA.ClusterData[InstanceIndex];
 	CD.DescIdx = DescId.AsInteger();
-	CD.ClusterIdx = 0;
+	CD.ClusterIdx = ClusterIdx;
 	CD.RenderIdx = RenderIdx;
 }
 
@@ -342,11 +392,24 @@ void AGPUSKIWorld::RemoveFromCluster(int32 InstanceIndex)
 			int32 SwappedInstanceIdx = Cluster.Instances[CD.RenderIdx];
 			SOA.ClusterData[SwappedInstanceIdx].RenderIdx = CD.RenderIdx;
 		}
+
+		// Destroy the component when the cluster becomes empty to avoid empty draw calls
+		MaybeDestroyEmptyCluster(Desc, CD.ClusterIdx);
 	}
 
 	CD.DescIdx = -1;
 	CD.ClusterIdx = -1;
 	CD.RenderIdx = -1;
+}
+
+void AGPUSKIWorld::MaybeDestroyEmptyCluster(FGPUSKIInstanceRenderDescFinal& Desc, int32 ClusterIdx)
+{
+	FGPUSKICluster& Cluster = Desc.Clusters[ClusterIdx];
+	if (Cluster.Instances.Num() == 0 && Cluster.Component)
+	{
+		Cluster.Component->DestroyComponent();
+		Cluster.Component = nullptr;
+	}
 }
 
 UGPUSKIClusterComponent* AGPUSKIWorld::CreateClusterComponent(FGPUSKIInstanceRenderDescFinal& Desc, int32 ClusterIdx)

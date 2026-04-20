@@ -68,6 +68,10 @@ struct GPUSKI_API FGPUSKIAnimPlayParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI")
 	bool bLoop = true;
+
+	// Blend duration in seconds from the previously playing animation (0 = instant snap)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI")
+	float BlendInTime = 0.0f;
 };
 
 //----------------------------------------------------------------------
@@ -109,7 +113,13 @@ struct GPUSKI_API FGPUSKIInstancesSOA
 		float AnimationPlayRate = 1;
 		UAnimSequenceBase* CurrentAsset = nullptr;
 
+		// Transition blend state
+		int32 FromAnimFrame = 0;    // Frame index to blend away from
+		float BlendAlpha = 1.0f;    // 0 = fully at FromFrame, 1 = fully at current animation
+		float BlendDuration = 0.0f; // Total blend duration in seconds (0 = no active blend)
+
 		bool IsSequenceValid() const { return AnimationCurrentSequence != 0xFFFF; }
+		bool IsBlending() const { return BlendDuration > 0.0f && BlendAlpha < 1.0f; }
 	};
 
 	struct FClusterData
@@ -220,6 +230,9 @@ struct GPUSKI_API FGPUSKIInstanceRenderDescFinal : public FGPUSKIInstanceRenderD
 
 	UPROPERTY(Transient)
 	TArray<FGPUSKICluster> Clusters;
+
+	// Maps spatial cell key (from WorldPosToCell) to index in Clusters array
+	TMap<FIntVector, int32> CellToClusterIndex;
 
 	FGPUSKIInstanceRenderDescFinal() {}
 	FGPUSKIInstanceRenderDescFinal(const FGPUSKIInstanceRenderDesc& Copy)

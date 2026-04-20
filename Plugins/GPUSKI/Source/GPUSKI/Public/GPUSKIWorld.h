@@ -117,6 +117,20 @@ public:
 
 	static AGPUSKIWorld* GetInstance(UWorld* World);
 
+	// Size of each spatial partition cell in cm (~32m). Instances within one cell share a cluster.
+	// Smaller = more draw calls but better culling. Larger = fewer components but weaker culling.
+	static constexpr float ClusterCellSize = 3200.0f;
+
+	// Convert a world position to a 2D integer cell key (Z ignored — suitable for ground crowds)
+	static FIntVector WorldPosToCell(const FVector& WorldPos)
+	{
+		return FIntVector(
+			FMath::FloorToInt(WorldPos.X / ClusterCellSize),
+			FMath::FloorToInt(WorldPos.Y / ClusterCellSize),
+			0
+		);
+	}
+
 private:
 	void TickAnimations(float DeltaSeconds);
 	void UpdateClusterComponents();
@@ -124,6 +138,9 @@ private:
 	// Assign an instance to a cluster
 	void AssignToCluster(int32 InstanceIndex, const FGPUSKIInstanceRenderDesc& RenderDesc);
 	void RemoveFromCluster(int32 InstanceIndex);
+
+	// Destroy a cluster's component if it has become empty
+	void MaybeDestroyEmptyCluster(FGPUSKIInstanceRenderDescFinal& Desc, int32 ClusterIdx);
 
 	// Ensure SOA arrays are large enough
 	void GrowSOA(int32 NewSize);

@@ -56,6 +56,45 @@ public:
 	TObjectPtr<UMaterialInterface> MaterialOverride;
 
 	//----------------------------------------------------------------------
+	// Transition Testing
+	//----------------------------------------------------------------------
+
+	// Enable periodic blended transitions between Animation and AnimationB
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test|Transition")
+	bool bEnableTransition = false;
+
+	// Second animation to alternate with the primary Animation (A/B mode, used when AnimationPool is empty)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test|Transition",
+		meta = (EditCondition = "bEnableTransition"))
+	TObjectPtr<UAnimSequenceBase> AnimationB;
+
+	// Blend duration in seconds between animations
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test|Transition",
+		meta = (EditCondition = "bEnableTransition", UIMin = 0.0, UIMax = 2.0))
+	float TransitionBlendTime = 0.3f;
+
+	// How long to hold each animation before switching (A/B mode only)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test|Transition",
+		meta = (EditCondition = "bEnableTransition", UIMin = 0.1))
+	float TransitionInterval = 2.0f;
+
+	// Pool mode: 2+ animations here activates per-instance independent random transitions.
+	// Each instance picks a random animation from the pool and transitions on its own schedule.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test|Transition",
+		meta = (EditCondition = "bEnableTransition"))
+	TArray<TObjectPtr<UAnimSequenceBase>> AnimationPool;
+
+	// Minimum seconds an instance holds an animation before transitioning (pool mode)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test|Transition",
+		meta = (EditCondition = "bEnableTransition", UIMin = 0.1))
+	float TransitionIntervalMin = 1.5f;
+
+	// Maximum seconds an instance holds an animation before transitioning (pool mode)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test|Transition",
+		meta = (EditCondition = "bEnableTransition", UIMin = 0.1))
+	float TransitionIntervalMax = 3.0f;
+
+	//----------------------------------------------------------------------
 	// Runtime info (read-only)
 	//----------------------------------------------------------------------
 
@@ -72,6 +111,7 @@ public:
 	AGPUSKITestActor();
 
 	void BeginPlay() override;
+	void Tick(float DeltaSeconds) override;
 	void EndPlay(EEndPlayReason::Type EndPlayReason) override;
 
 	// Editor button to re-spawn at runtime (PIE)
@@ -84,10 +124,18 @@ private:
 	void SpawnGPUInstances();
 	void SpawnCPUInstances();
 	void DestroyAllInstances();
+	void OnTransitionTimer();
 
 	UPROPERTY()
 	TArray<FGPUSKIInstanceHandle> GPUHandles;
 
 	UPROPERTY()
 	TArray<TObjectPtr<AActor>> CPUActors;
+
+	FTimerHandle TransitionTimerHandle;
+	bool bTransitionOnB = false;
+
+	// Pool mode per-instance state (parallel to GPUHandles)
+	TArray<float> InstanceNextTransitionTimes;
+	TArray<int32> InstanceCurrentAnimIndices;
 };
