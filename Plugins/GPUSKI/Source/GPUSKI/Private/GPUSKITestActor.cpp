@@ -22,9 +22,12 @@ void AGPUSKITestActor::BeginPlay()
 {
 	Super::BeginPlay();
 
-	SpawnGPUInstances();
+	if (SpawnMode != EGPUSKITestSpawnMode::CPUOnly)
+	{
+		SpawnGPUInstances();
+	}
 
-	if (bSpawnCPUComparison)
+	if (SpawnMode != EGPUSKITestSpawnMode::GPUOnly)
 	{
 		SpawnCPUInstances();
 	}
@@ -62,9 +65,13 @@ void AGPUSKITestActor::RespawnInstances()
 	GetWorldTimerManager().ClearTimer(TransitionTimerHandle);
 
 	DestroyAllInstances();
-	SpawnGPUInstances();
 
-	if (bSpawnCPUComparison)
+	if (SpawnMode != EGPUSKITestSpawnMode::CPUOnly)
+	{
+		SpawnGPUInstances();
+	}
+
+	if (SpawnMode != EGPUSKITestSpawnMode::GPUOnly)
 	{
 		SpawnCPUInstances();
 	}
@@ -169,8 +176,11 @@ void AGPUSKITestActor::SpawnCPUInstances()
 		return;
 
 	const FVector Origin = GetActorLocation();
-	// Offset CPU group to the side (negative Y) so both groups are visible side by side
-	const float CPUOffsetY = -(Rows * Spacing + Spacing * 2.0f);
+	// In Comparison mode, offset CPU group to -Y so both groups are visible side by side.
+	// In CPUOnly mode, spawn at the actor origin — no GPU group to dodge.
+	const float CPUOffsetY = (SpawnMode == EGPUSKITestSpawnMode::Comparison)
+		? -(Rows * Spacing + Spacing * 2.0f)
+		: 0.0f;
 	const float AnimLength = Animation->GetPlayLength();
 
 	CPUActors.Reserve(Rows * Columns);

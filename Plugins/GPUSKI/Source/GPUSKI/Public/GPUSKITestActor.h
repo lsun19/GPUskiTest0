@@ -13,6 +13,14 @@ class USkeletalMesh;
 class UAnimSequenceBase;
 class UGPUSKISubsystem;
 
+UENUM(BlueprintType)
+enum class EGPUSKITestSpawnMode : uint8
+{
+	GPUOnly			UMETA(DisplayName = "GPU Only"),
+	CPUOnly			UMETA(DisplayName = "CPU Only"),
+	Comparison		UMETA(DisplayName = "GPU + CPU Comparison"),
+};
+
 UCLASS(BlueprintType, meta = (DisplayName = "GPUSKI Test Actor"))
 class GPUSKI_API AGPUSKITestActor : public AActor
 {
@@ -47,9 +55,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test")
 	bool bRandomizeStartTime = true;
 
-	// Spawn conventional CPU skeletal meshes next to the GPU instances for comparison
+	// Choose which instances to spawn:
+	//  GPUOnly    — GPUSKI instances only (default; transitions apply)
+	//  CPUOnly    — conventional USkeletalMeshComponent actors only (no GPU, no transitions)
+	//  Comparison — both, side by side (CPU group offset on -Y for visual comparison)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test|Comparison")
-	bool bSpawnCPUComparison = false;
+	EGPUSKITestSpawnMode SpawnMode = EGPUSKITestSpawnMode::GPUOnly;
 
 	// Material override for both GPU and CPU instances (leave empty to use mesh default)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test")
