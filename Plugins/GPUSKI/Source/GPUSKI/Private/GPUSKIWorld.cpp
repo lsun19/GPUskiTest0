@@ -4,6 +4,7 @@
 #include "GPUSKIClusterComponent.h"
 #include "GPUSKIAnimCollection.h"
 #include "GPUSKIRenderResources.h"
+#include "GPUSKISubsystem.h"
 
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -271,6 +272,9 @@ FTransform AGPUSKIWorld::GetInstanceTransform(const FGPUSKIInstanceHandle& Handl
 //----------------------------------------------------------------------
 void AGPUSKIWorld::TickAnimations(float DeltaSeconds)
 {
+	struct FPendingNotify { FGPUSKIInstanceHandle Handle; FName NotifyName; };
+	TArray<FPendingNotify, TInlineAllocator<32>> PendingNotifies;
+
 	for (auto& DescFinal : RenderDescs)
 	{
 		UGPUSKIAnimCollection* AnimColl = DescFinal.AnimCollection;
@@ -300,11 +304,13 @@ void AGPUSKIWorld::TickAnimations(float DeltaSeconds)
 				const float SeqLength = SeqDef.GetSequenceLength();
 
 				// Handle looping / completion
+				bool bLoopedThisFrame = false;
 				if (AnimData.AnimationTime >= SeqLength)
 				{
 					if (Slot.bAnimationLooped)
 					{
 						AnimData.AnimationTime = FMath::Fmod(AnimData.AnimationTime, SeqLength);
+						bLoopedThisFrame = true;
 					}
 					else
 					{
@@ -323,6 +329,53 @@ void AGPUSKIWorld::TickAnimations(float DeltaSeconds)
 					if (AnimData.BlendAlpha >= 1.0f)
 						AnimData.BlendDuration = 0.0f; // Transition complete
 				}
+
+				// Scan for instant-notify crossings in (PrevLocal, CurLocal].
+				// PreAnimFrames was set from the old CurAnimFrames above, so it's the frame we just left.
+				if (SeqDef.BakedNotifies.Num() > 0)
+				{
+					const int32 PrevLocal = SOA.PreAnimFrames[InstIdx] - SeqDef.AnimationFrameIndex;
+					const int32 CurLocal = SOA.CurAnimFrames[InstIdx] - SeqDef.AnimationFrameIndex;
+
+					// Skip if PreAnimFrames isn't in the current sequence (e.g. first tick after a blend transition).
+					if (PrevLocal >= 0 && PrevLocal < SeqDef.AnimationFrameCount)
+					{
+						FGPUSKIInstanceHandle Handle;
+						Handle.InstanceIndex = InstIdx;
+						Handle.Version = Slot.Version;
+
+						for (const FGPUSKIBakedNotify& Notify : SeqDef.BakedNotifies)
+						{
+							bool bFires = false;
+							if (bLoopedThisFrame)
+							{
+								// Scan wraps: (PrevLocal, Count) ∪ [0, CurLocal]
+								bFires = (Notify.LocalFrame > PrevLocal) || (Notify.LocalFrame <= CurLocal);
+							}
+							else
+							{
+								bFires = (Notify.LocalFrame > PrevLocal) && (Notify.LocalFrame <= CurLocal);
+							}
+
+							if (bFires)
+							{
+								PendingNotifies.Add({ Handle, Notify.NotifyName });
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Drain after iteration so handlers can safely destroy instances without corrupting the loop.
+	if (PendingNotifies.Num() > 0)
+	{
+		if (UGPUSKISubsystem* Subsystem = GetWorld()->GetSubsystem<UGPUSKISubsystem>())
+		{
+			for (const FPendingNotify& P : PendingNotifies)
+			{
+				Subsystem->OnAnimNotify.Broadcast(P.Handle, P.NotifyName);
 			}
 		}
 	}

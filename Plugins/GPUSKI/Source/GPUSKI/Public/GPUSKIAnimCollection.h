@@ -21,6 +21,22 @@ class FGPUSKIAnimCollectionUniformParams;
 typedef TSharedPtr<FGPUSKIMeshDataEx, ESPMode::ThreadSafe> FGPUSKIMeshDataExPtr;
 
 //----------------------------------------------------------------------
+// Baked Notify (instant notifies only, resolved to local frame index)
+//----------------------------------------------------------------------
+USTRUCT()
+struct GPUSKI_API FGPUSKIBakedNotify
+{
+	GENERATED_USTRUCT_BODY()
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "GPUSKI")
+	FName NotifyName;
+
+	// Local frame index within the sequence (0 .. AnimationFrameCount-1)
+	UPROPERTY(VisibleAnywhere, Transient, Category = "GPUSKI")
+	int32 LocalFrame = 0;
+};
+
+//----------------------------------------------------------------------
 // Sequence Definition
 //----------------------------------------------------------------------
 USTRUCT(BlueprintType)
@@ -42,6 +58,10 @@ struct GPUSKI_API FGPUSKISequenceDef
 	// Number of frames generated for this sequence (computed during build)
 	UPROPERTY(VisibleAnywhere, Transient, Category = "GPUSKI")
 	int AnimationFrameCount = 0;
+
+	// Instant notifies baked to local frame indices, sorted ascending (computed during build)
+	UPROPERTY(VisibleAnywhere, Transient, Category = "GPUSKI")
+	TArray<FGPUSKIBakedNotify> BakedNotifies;
 
 	FGPUSKISequenceDef() {}
 

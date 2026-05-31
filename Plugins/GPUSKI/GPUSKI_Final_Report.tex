@@ -1,0 +1,266 @@
+\documentclass[11pt, a4paper]{article}
+
+%======================================================================
+% Packages
+%======================================================================
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{parskip}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=blue!60!black,
+    urlcolor=blue!60!black
+}
+
+%======================================================================
+% Listings style (C++ / HLSL inline code)
+%======================================================================
+\lstdefinestyle{codestyle}{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue!70!black},
+    commentstyle=\color{gray},
+    stringstyle=\color{red!60!black},
+    showstringspaces=false,
+    breaklines=true,
+    frame=single,
+    language=C++,
+    morekeywords={UFUNCTION, UPROPERTY, UCLASS, USTRUCT, FName, int32, uint32, float, true, false}
+}
+\lstset{style=codestyle}
+
+%======================================================================
+% Metadata
+%======================================================================
+\title{\textbf{GPUSKI: A GPU-Driven Skeletal Mesh Instancing Plugin \\ for Unreal Engine 5} \\[0.5em]
+\large Final Report}
+\author{LIYU SUN}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent \textbf{GPUSKI} is an Unreal Engine 5 plugin that removes the per-instance CPU cost of skeletal mesh animation by pre-baking animation sequences into a GPU-resident buffer and performing skinning through a custom vertex factory. Instances are grouped by material and spatial cell into cluster components, each contributing exactly one draw call regardless of population. Benchmark results at 10{,}000 instances show a $\sim$7$\times$ reduction in frame time ($\sim$140\,ms $\to$ $\sim$20\,ms) and a $\sim$92$\times$ reduction in draw calls ($\sim$33{,}000 $\to$ $\sim$360) relative to a conventional \texttt{USkeletalMeshComponent}-per-actor baseline. This report documents the architecture, the implementation milestones (MVP, per-instance animation transitions, spatial partitioning, animation notify events), the measured performance, and a roadmap for continued development.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%======================================================================
+\section{Introduction}
+%======================================================================
+
+\subsection{Problem Statement}
+
+Skeletal mesh rendering in Unreal Engine relies on a per-instance \texttt{USkeletal\-MeshComponent} that ticks its own \texttt{UAnimInstance}, evaluates a pose on the CPU each frame, uploads a bone matrix buffer to the GPU, and issues a dedicated draw call. This architecture is correct and flexible, but it does not scale: a scene containing a few thousand animated characters typically spends the majority of its frame time in animation update and in CPU-side render-command submission, long before vertex shading becomes a concern. For game genres that rely on large crowds---real-time strategy, battle simulators, open-world background NPCs---this scaling wall is a practical limit on what the engine can express.
+
+\textbf{GPUSKI} is an Unreal Engine 5 plugin that removes this wall by moving skeletal animation and instance management entirely off the hot path. A scene containing ten thousand animated instances should cost roughly the same CPU time as a scene containing one, and the GPU should only pay for what it actually draws.
+
+\subsection{Core Idea}
+
+At build time, GPUSKI samples every animation sequence in a user-authored \emph{Animation Collection} at a fixed frequency (default 30\,Hz) and packs the resulting bone matrices---one \texttt{float3x4} per bone per frame---into a single structured buffer resident in VRAM. At runtime, each instance stores only a transform, a current-frame index, and a previous-frame index; no pose evaluation occurs on the CPU. A custom vertex factory reads the appropriate matrices directly from the baked buffer, performs skinning on the GPU, and blends between the current and previous frames for motion-vector continuity. Instance state travels to the GPU through GPUScene's per-instance custom-data channel, not through per-component uniform uploads.
+
+Instances that share the same mesh, materials, and animation collection are grouped into spatial clusters (see Section~\ref{sec:spatial}), each of which is backed by a single \texttt{UGPUSKIClusterComponent}. One component, one draw call, one scene-proxy lifetime---regardless of how many instances it contains.
+
+\subsection{Architecture Overview}
+
+The runtime is organised around five classes:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{\texttt{AGPUSKIWorld}} --- a per-world singleton actor that owns the Structure-of-Arrays (SOA) instance store, the handle allocator, and the deduplicated render-descriptor set. It ticks animations and marks cluster components dirty.
+    \item \textbf{\texttt{UGPUSKIAnimCollection}} --- a \texttt{UDataAsset} that holds the skeleton, the list of sequences to bake, the list of supported meshes, and (after build) the GPU animation buffer, the bone-mapping tables, and per-frame bounding boxes.
+    \item \textbf{\texttt{UGPUSKIClusterComponent}} --- a \texttt{UMeshComponent} whose scene proxy supplies instance data through a custom \texttt{FInstance\-Scene\-Data\-Buffers} subclass. Its vertex factory consumes the Anim Collection's baked buffer.
+    \item \textbf{\texttt{UGPUSKISubsystem}} --- a \texttt{UWorldSubsystem} that exposes the Blueprint-facing API (\texttt{CreateInstance}, \texttt{DestroyInstance}, \texttt{PlayAnimation}, \texttt{SetInstanceTransform}) and broadcasts animation-notify events.
+    \item \textbf{\texttt{AGPUSKITestActor}} --- a grid-spawning utility for profiling and visual regression, capable of spawning GPU instances, equivalent CPU instances (conventional \texttt{USkeletalMeshComponent} actors), or both side-by-side for direct comparison.
+\end{itemize}
+
+A 32-bit \texttt{FGPUSKIInstanceHandle} (instance index + version stamp) is the only handle user code ever holds; the SOA layout is private to the plugin.
+
+%======================================================================
+\section{Implementation Summary}
+%======================================================================
+
+\subsection{Minimum Viable Plugin (Phase 1)}
+
+The MVP established the rendering pipeline end-to-end:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item The Anim Collection build pipeline samples every sequence at its declared frequency, constructs pose matrices in component space, converts them to the render-matrix layout (\texttt{float3x4}, half-precision by default), and uploads a single structured buffer. Reference-pose inverses and bone-mapping tables are computed once at build time.
+    \item The custom vertex factory (\texttt{GPUSKIVertexFactory.ush}) reads the current and previous frame indices from GPUScene per-instance custom data (slots 0 and 1), computes both bone matrices, and uses them for skinning and motion-vector output respectively.
+    \item The scene proxy's \texttt{FInstanceSceneDataBuffers} subclass exposes \texttt{Init()} to enable \texttt{bHasPer\-Instance\-Dynamic\-Data} and \texttt{bHasPer\-Instance\-Custom\-Data} flags---a subclassing pattern required because those flags are \texttt{protected} in the engine base class.
+    \item Instance handles are allocated from a free-list; slots are version-stamped so handles invalidate cleanly when the slot is reused.
+\end{itemize}
+
+\subsection{Animation Transitions (Phase 2, Sprint 1)}
+
+Instances were initially limited to snapping instantly from one sequence to another. To support blended transitions without altering the GPU buffer layout or the per-instance memory footprint, two of the four per-instance custom-data floats that were already allocated for alignment padding were repurposed:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item Slot 2 (\texttt{FromFrame})---the last frame index of the outgoing sequence.
+    \item Slot 3 (\texttt{BlendAlpha})---a float in $[0, 1]$ advanced on the CPU each tick as $\text{BlendAlpha} + \Delta t / \text{BlendDuration}$.
+\end{itemize}
+
+The vertex factory reads all four slots. When \texttt{BlendAlpha < 1.0} it samples bone matrices from both \texttt{FromFrame} and \texttt{CurFrame}, linearly interpolates the \texttt{float3x4} matrices, and skins with the result; when \texttt{BlendAlpha >= 1.0} the from-sample is skipped entirely. \texttt{FGPUSKIAnimPlayParams::BlendInTime} on the \texttt{PlayAnimation} call controls the duration.
+
+The transition state is entirely per-instance. The \texttt{GPUSKITestActor} was extended with two test modes---\textbf{A/B shared mode} (a timer alternates the whole crowd between two sequences) and \textbf{pool mode} (each instance independently samples from an \texttt{AnimationPool} with staggered transition schedules)---to exercise both the shared and independent paths.
+
+\subsection{Spatial Partitioning (Phase 2, Sprint 2)}
+\label{sec:spatial}
+
+The initial cluster design used one component per \texttt{(mesh, materials, anim collection)} combination. This collapsed to a single bounding box that enclosed the entire crowd, and frustum / occlusion culling became effectively a boolean: either every instance was submitted or none were. At ten thousand instances this eliminated most of the GPU-side savings.
+
+The fix was a 32-metre (3200\,cm) 2D cell grid keyed by \texttt{FIntVector}. \texttt{FGPUSKIInstanceRenderDescFinal} now holds a \texttt{TMap<FIntVector, int32> CellToClusterIndex} alongside its \texttt{Clusters} array; each cluster's scene proxy computes its own tight bounds. \texttt{SetInstanceTransform} compares the old and new cell keys and reassigns on boundary crossings---static instances pay zero cost. Emptied clusters destroy their component but keep the map entry so a future instance in the same cell reuses the stable \texttt{ClusterIdx}.
+
+The $Z$-axis is ignored, which is appropriate for ground-based crowds and trivially extensible to 3D when required.
+
+\subsection{Test and Comparison Utility}
+
+\texttt{AGPUSKITestActor} exposes a $\texttt{Rows} \times \texttt{Columns}$ grid spawn with adjustable spacing and material override, runtime-toggleable between three modes---\textbf{GPU Only}, \textbf{CPU Only}, and \textbf{Comparison} (both side-by-side, with the CPU group offset on $-Y$). The actor is the single source of performance data for this project.
+
+%======================================================================
+\section{Performance Results}
+%======================================================================
+
+The decisive test configuration places 10{,}000 ($100 \times 100$) instances of the same skeletal mesh playing the same looping animation in an otherwise empty level, with randomised start times to avoid pose coherence. All measurements are from \texttt{stat unit} on the same workstation; only \texttt{SpawnMode} differs between the two runs.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Metric} & \textbf{CPU Only} & \textbf{GPU Only} & \textbf{Improvement} \\
+\midrule
+Frame time (ms)          & $\sim$140              & $\sim$20            & $\sim$7$\times$ faster  \\
+Effective frame rate     & $\sim$7 FPS            & $\sim$50 FPS        & $\sim$7$\times$ higher  \\
+Draw calls               & $\sim$33{,}000+        & $\sim$360+          & $\sim$92$\times$ fewer  \\
+Animation on CPU?        & Yes (per tick)         & No                  & ---                     \\
+\bottomrule
+\end{tabular}
+\caption{Performance comparison at 10{,}000 instances. \\
+\footnotesize See supplementary video: \texttt{stat unit} overlay comparison at 10{,}000 instances.}
+\label{tab:perf}
+\end{table}
+
+% Uncomment and supply an image path to embed a screenshot of the stat unit comparison:
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.9\textwidth]{figures/stat_unit_comparison.png}
+%     \caption{\texttt{stat unit} overlay at 10{,}000 instances: CPU only (top) vs GPU only (bottom).}
+%     \label{fig:statunit}
+% \end{figure}
+
+The draw-call collapse is the direct consequence of the cluster architecture: the CPU path submits one draw call per \texttt{USkeletalMeshComponent}, while the GPU path submits one per non-empty spatial cell. The frame-time reduction additionally reflects the elimination of per-instance \texttt{UAnimInstance} ticks; at ten thousand instances the CPU-side animation work dominates even the draw-call submission cost. The GPU path's $\sim$20\,ms is primarily raster work (shadows, main pass, and the skinning shader itself), not CPU overhead---meaning further scaling gains will come from render-side techniques such as LOD and occlusion culling, not from further CPU optimisation.
+
+%======================================================================
+\section{Animation Notify Events (Latest Update)}
+%======================================================================
+
+\subsection{Motivation}
+
+Pre-baked skinning removes the CPU-side \texttt{UAnimInstance}, which also removes the mechanism by which gameplay code normally observes animation events: footsteps, weapon hits, particle spawns, audio cues. Without a replacement, GPUSKI instances are decorative---they animate but they cannot signal. The notify-event system restores that gameplay channel without re-introducing a per-instance CPU tick.
+
+\subsection{Design}
+
+The feature preserves the plugin's core invariant: per-instance per-tick cost must remain a handful of integer operations. Three components were added:
+
+\paragraph{Bake-time (\texttt{FGPUSKIBakedNotify}).}
+During \texttt{BuildAnimationData}, the plugin walks each sequence's \texttt{UAnimSequenceBase::Notifies} array, discards any duration notifies (\texttt{NotifyStateClass != nullptr}) and any with an unset \texttt{NotifyName}, converts \texttt{FAnimNotifyEvent::GetTriggerTime()} to a local frame index via the sequence's \texttt{SampleFrequency}, and stores the result in a sorted \texttt{TArray<FGPUSKIBakedNotify>} on the sequence definition. No runtime asset lookups are ever required.
+
+\paragraph{Runtime detection (\texttt{AGPUSKIWorld::TickAnimations}).}
+Immediately after updating \texttt{CurAnimFrames[i]}, the tick loop performs a sweep of the current sequence's baked notify list for any entry whose local frame falls in $(\texttt{PrevLocal}, \texttt{CurLocal}]$. Loop wrap (when the sequence wrapped around the end this tick) is handled by a two-half-range check: $(\texttt{Notify} > \texttt{PrevLocal}) \lor (\texttt{Notify} \leq \texttt{CurLocal})$. Transition wrap (when \texttt{PrevAnimFrame} points into a different sequence from an in-flight blend) is detected by a range check and skipped---the first tick after a blend does not replay notifies from the outgoing sequence. Typical per-instance cost is $O(\text{number of notifies on the current sequence})$, usually zero to three.
+
+\paragraph{Delivery (\texttt{UGPUSKISubsystem::OnAnimNotify}).}
+A single \texttt{Blueprint\-Assignable} dynamic multicast delegate with two parameters (\texttt{FGPUSKIInstanceHandle}, \texttt{FName}) on the subsystem. Pending notifies are accumulated into a stack-allocated array during the tick sweep and broadcast only after the full animation loop has completed; this guarantees that a Blueprint handler which destroys an instance cannot corrupt the iteration in progress.
+
+A per-instance \texttt{FMulticastDelegate} was considered and rejected: it would have added $\sim$16 bytes per slot of the SOA and exposed per-instance bind/unbind to Blueprints, complicating the API without enabling any behaviour that filtering the global delegate by handle cannot already express.
+
+\subsection{Test Utility}
+
+\texttt{AGPUSKITestActor} received a boolean \texttt{bLogAnimNotifies} and a \texttt{UFUNCTION} handler \texttt{HandleAnimNotify(FGPUSKIInstanceHandle, FName)}. When enabled, the actor binds to \texttt{UGPUSKISubsystem::OnAnimNotify} in \texttt{BeginPlay} (and the editor's \texttt{RespawnInstances}), logs each received notify to \texttt{LogGPUSKI}, and unbinds cleanly in \texttt{DestroyAllInstances}.
+
+\subsection{Demonstration}
+
+A supplementary video demonstrates the end-to-end flow: a \texttt{`Hit!'} instant notify was placed on the attack animation sequence, the Anim Collection was rebuilt (causing the notify to be baked into \texttt{FGPUSKISequenceDef::BakedNotifies}), the TestActor's \texttt{bLogAnimNotifies} was toggled on, and PIE was started. The Output Log receives one \texttt{GPUSKITestActor: Notify `Hit!' on instance N} entry per GPU instance per sequence loop, with entries staggered across frames thanks to randomised start times---direct visual confirmation that each instance is independently tracking its own animation state.
+
+% Uncomment and supply an image path to embed a screenshot of the notify log:
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.9\textwidth]{figures/notify_log.png}
+%     \caption{Output Log showing per-instance \texttt{`Hit!'} notifications fired during PIE.}
+%     \label{fig:notify}
+% \end{figure}
+
+\subsection{Known Limitations}
+
+Three scope boundaries are deliberate and documented:
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Duration notifies are skipped.} Notify-state events with a begin/tick/end lifecycle require per-instance active-set tracking in the SOA and a policy for what happens across transitions; both are deferred.
+    \item \textbf{Composite children are not walked.} The bake pass reads only the composite asset's own \texttt{Notifies} array. Notifies embedded inside a \texttt{UAnimComposite}'s child sequences require a recursive walk with time remapping, deferred for future work.
+    \item \textbf{Frame resolution is bounded by \texttt{SampleFrequency}.} A notify placed between two sampled frames snaps to the floor frame. At the default 30\,Hz this corresponds to at worst $\sim$33\,ms of temporal slip, which is well within the perceptual tolerance for the target use case.
+\end{enumerate}
+
+%======================================================================
+\section{Future Work}
+%======================================================================
+
+The MVP is feature-complete for crowd rendering, and the notify system closes the most significant gameplay-integration gap. The following is an ordered roadmap for continued personal development, prioritised by impact-per-effort.
+
+\subsection{Near-Term: Rendering Performance}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Multi-LOD support.} The per-mesh baked data already tolerates multiple LODs; what is missing is the per-instance LOD selection hook in the cluster component's scene proxy. GPUScene provides distance-based LOD natively once the scene proxy reports multiple LOD resources. This is the largest remaining frame-time lever for distant crowds and pairs directly with the spatial-partitioning work of Sprint 2.
+    \item \textbf{Occlusion culling via HZB.} Scene-proxy integration with the engine's hierarchical Z-buffer tests, giving each cluster a free early-out when fully occluded by terrain or architecture.
+\end{itemize}
+
+\subsection{Near-Term: Animation}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Per-instance play-rate variation.} \texttt{FAnimData::AnimationPlayRate} is already part of the SOA; a \texttt{SetPlayRate(Handle, float)} Blueprint call is a two-line addition and immediately enables variety in synchronised crowds (a battalion of soldiers marching slightly out of step).
+    \item \textbf{Additive animations.} A second \texttt{CalcBoneMatrix} pass in the vertex factory with a summed result would enable layered overlays (aim offsets, breathing cycles, damage reactions) at roughly double the skinning cost---still far below CPU-driven additive blending.
+    \item \textbf{Notify states (duration notifies).} Reinstating the begin/tick/end lifecycle by adding an ``active notify state'' bitmask to the SOA slot. This closes the third documented limitation of the current notify system.
+    \item \textbf{Sequence completion delegate.} A Blueprint callback when a non-looping sequence reaches its end frame. Trivial to add now that the notify-broadcast pipeline exists.
+\end{itemize}
+
+\subsection{Medium-Term: Instance Management}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Instance hierarchy and socket attachments.} Enabling a \texttt{UStaticMeshComponent} (weapon, hat, torch) to attach to a named bone of a GPUSKI instance, with the attachment transform computed from the baked bone matrices on the CPU each tick. The bone buffer is already authoritative on the GPU; exposing a CPU read-back sampler for specific (instance, bone, frame) tuples is the only missing piece.
+    \item \textbf{Per-instance custom-data API.} Slots 4 and above of the per-instance custom-data array are reserved by \texttt{NumCustomDataFloat} but not yet surfaced through the Blueprint API. A \texttt{SetCustomData(Handle, SlotIndex, float)} call would expose them to gameplay shaders (team colour, damage tint, selection highlight).
+    \item \textbf{Dynamic pose override.} An escape hatch for a small number of instances (a cinematic hero, an IK-driven ragdoll) to override the baked pose with CPU-computed matrices while the surrounding crowd remains GPU-driven.
+\end{itemize}
+
+\subsection{Long-Term: Tooling and Ergonomics}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Runtime AnimCollection rebuild.} Rebuilding the GPU buffer without restarting PIE, enabling streaming of new mesh/animation content and modding support.
+    \item \textbf{Debug visualiser CVar (\texttt{gpuski.debug.drawbounds}).} A toggleable overlay that draws cluster bounds and highlights which instances are in which cell, invaluable for tuning the cell size to a specific crowd topology.
+    \item \textbf{Stats expansion.} Separating \texttt{TickAnimations} from \texttt{BuildDynamicData} in the stat groups would make it possible to distinguish animation-update cost from GPUScene upload cost during profiling.
+    \item \textbf{Editor AnimCollection details customisation.} A summary panel in the data-asset editor showing frame count, bone count, VRAM size, and bake-time warnings (e.g.\ sequences longer than some threshold) at a glance.
+\end{itemize}
+
+\subsection{Speculative}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Compute-shader-based pose evaluation.} Replacing the linear-time-sample bake with a runtime-evaluated compute pass, enabling procedural animation (wind, crowd avoidance) without a pre-bake step. This is a substantial re-architecture and should be weighed against the simplicity that the current approach enables.
+    \item \textbf{Cross-plugin integration.} Publishing the per-instance transform stream through Mass Entity or a similar ECS layer would make GPUSKI a natural render back-end for large-scale simulation systems.
+\end{itemize}
+
+%======================================================================
+\section{Closing Remarks}
+%======================================================================
+
+GPUSKI began as a targeted rewrite of skeletal-mesh rendering for scenes that do not need per-instance CPU animation, and has grown into a small but coherent stack: a data-asset bake pipeline, a GPU-driven render path, a spatial cluster manager, a per-instance blend system, and a gameplay-integration channel through notify events. The $\sim$7$\times$ frame-time improvement and $\sim$92$\times$ draw-call reduction measured at 10{,}000 instances validate the core architectural thesis; the recently added notify system demonstrates that the pipeline can host richer gameplay integrations without compromising that performance envelope.
+
+The roadmap ahead is incremental rather than architectural---each of the proposed future-work items slots into the existing systems without disturbing their invariants, which suggests that the plugin has reached a stable internal shape. Continued personal development on this project will focus first on multi-LOD and per-instance play-rate variation as the highest-leverage improvements, with additive animation and instance attachments as the subsequent themes.
+
+\end{document}

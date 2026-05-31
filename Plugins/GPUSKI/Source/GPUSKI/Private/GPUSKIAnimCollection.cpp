@@ -174,6 +174,29 @@ bool UGPUSKIAnimCollection::BuildAnimationData()
 		SeqDef.AnimationFrameCount = SeqDef.CalcFrameCount();
 		SeqDef.AnimationFrameIndex = FrameCounter;
 		FrameCounter += SeqDef.AnimationFrameCount;
+
+		// Bake instant notifies to local frame indices. Duration notifies (NotifyStateClass) are skipped for v1.
+		SeqDef.BakedNotifies.Reset();
+		for (const FAnimNotifyEvent& Notify : SeqDef.Sequence->Notifies)
+		{
+			if (Notify.NotifyStateClass)
+				continue;
+			if (Notify.NotifyName == NAME_None)
+				continue;
+
+			const float TriggerTime = Notify.GetTriggerTime();
+			const int32 LocalFrame = FMath::Clamp(
+				(int32)(TriggerTime * SeqDef.SampleFrequency),
+				0, SeqDef.AnimationFrameCount - 1);
+
+			FGPUSKIBakedNotify& Baked = SeqDef.BakedNotifies.AddDefaulted_GetRef();
+			Baked.NotifyName = Notify.NotifyName;
+			Baked.LocalFrame = LocalFrame;
+		}
+		SeqDef.BakedNotifies.Sort([](const FGPUSKIBakedNotify& A, const FGPUSKIBakedNotify& B)
+		{
+			return A.LocalFrame < B.LocalFrame;
+		});
 	}
 
 	TotalFrameCount = FrameCounter;

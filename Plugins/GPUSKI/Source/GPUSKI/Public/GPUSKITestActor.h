@@ -106,6 +106,15 @@ public:
 	float TransitionIntervalMax = 3.0f;
 
 	//----------------------------------------------------------------------
+	// Animation Notifies
+	//----------------------------------------------------------------------
+
+	// Log every animation notify fired by this actor's GPU instances to the output log.
+	// Useful for smoke-testing notify events on a new AnimCollection. GPU-only feature.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPUSKI Test|Notifies")
+	bool bLogAnimNotifies = false;
+
+	//----------------------------------------------------------------------
 	// Runtime info (read-only)
 	//----------------------------------------------------------------------
 
@@ -131,11 +140,17 @@ public:
 	void RespawnInstances();
 #endif
 
+	UFUNCTION()
+	void HandleAnimNotify(FGPUSKIInstanceHandle Handle, FName NotifyName);
+
 private:
 	void SpawnGPUInstances();
 	void SpawnCPUInstances();
 	void DestroyAllInstances();
 	void OnTransitionTimer();
+
+	// Track whether we own a binding on UGPUSKISubsystem::OnAnimNotify so we only remove ours.
+	bool bNotifyHandlerBound = false;
 
 	UPROPERTY()
 	TArray<FGPUSKIInstanceHandle> GPUHandles;

@@ -51,6 +51,15 @@ void AGPUSKITestActor::BeginPlay()
 	{
 		SetActorTickEnabled(true);
 	}
+
+	if (bLogAnimNotifies && GPUHandles.Num() > 0)
+	{
+		if (UGPUSKISubsystem* Subsystem = GetWorld()->GetSubsystem<UGPUSKISubsystem>())
+		{
+			Subsystem->OnAnimNotify.AddDynamic(this, &AGPUSKITestActor::HandleAnimNotify);
+			bNotifyHandlerBound = true;
+		}
+	}
 }
 
 void AGPUSKITestActor::EndPlay(EEndPlayReason::Type EndPlayReason)
@@ -92,6 +101,15 @@ void AGPUSKITestActor::RespawnInstances()
 	if (bPoolMode && GPUHandles.Num() > 0)
 	{
 		SetActorTickEnabled(true);
+	}
+
+	if (bLogAnimNotifies && GPUHandles.Num() > 0)
+	{
+		if (UGPUSKISubsystem* Subsystem = GetWorld()->GetSubsystem<UGPUSKISubsystem>())
+		{
+			Subsystem->OnAnimNotify.AddDynamic(this, &AGPUSKITestActor::HandleAnimNotify);
+			bNotifyHandlerBound = true;
+		}
 	}
 }
 #endif
@@ -290,6 +308,15 @@ void AGPUSKITestActor::Tick(float DeltaSeconds)
 }
 
 //----------------------------------------------------------------------
+// Animation Notify handler (demo)
+//----------------------------------------------------------------------
+void AGPUSKITestActor::HandleAnimNotify(FGPUSKIInstanceHandle Handle, FName NotifyName)
+{
+	UE_LOG(LogGPUSKI, Log, TEXT("GPUSKITestActor: Notify '%s' on instance %d"),
+		*NotifyName.ToString(), Handle.InstanceIndex);
+}
+
+//----------------------------------------------------------------------
 // Cleanup
 //----------------------------------------------------------------------
 void AGPUSKITestActor::DestroyAllInstances()
@@ -305,6 +332,12 @@ void AGPUSKITestActor::DestroyAllInstances()
 	UGPUSKISubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UGPUSKISubsystem>() : nullptr;
 	if (Subsystem)
 	{
+		if (bNotifyHandlerBound)
+		{
+			Subsystem->OnAnimNotify.RemoveDynamic(this, &AGPUSKITestActor::HandleAnimNotify);
+			bNotifyHandlerBound = false;
+		}
+
 		for (FGPUSKIInstanceHandle& Handle : GPUHandles)
 		{
 			Subsystem->DestroyInstance(Handle);

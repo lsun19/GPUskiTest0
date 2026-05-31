@@ -12,6 +12,11 @@ class AGPUSKIWorld;
 class UGPUSKIAnimCollection;
 class USkeletalMesh;
 
+// Global animation notify delegate. Fires once per instance × notify crossing, per frame.
+// Bind at the subsystem and filter by Handle if you only care about a subset of instances.
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnGPUSKIAnimNotify,
+	FGPUSKIInstanceHandle, Handle, FName, NotifyName);
+
 UCLASS()
 class GPUSKI_API UGPUSKISubsystem : public UWorldSubsystem
 {
@@ -20,6 +25,11 @@ class GPUSKI_API UGPUSKISubsystem : public UWorldSubsystem
 public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
+
+	// Broadcast once per instance × instant-notify crossing per tick. Handlers must not assume
+	// the instance still exists on reentry; call IsHandleValid first if you might destroy others.
+	UPROPERTY(BlueprintAssignable, Category = "GPUSKI|Animation")
+	FOnGPUSKIAnimNotify OnAnimNotify;
 
 	//----------------------------------------------------------------------
 	// Instance Management
